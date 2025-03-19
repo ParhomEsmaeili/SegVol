@@ -1,8 +1,8 @@
 {
-    "dataset_name": "AbdomenCT-1k",
-    "categories": ["liver", "kidney", "spleen", "pancreas"],
+    "dataset_name": "BraTS2021",
+    "categories": ["tumor"], 
     "demo_case": {
-        "ct_path": "path/to/ct",
-        "gt_path": "path/to/gt" 
+        "ct_path": "/home/parhomesmaeili/IS-Validation-Framework/IS_Validate/datasets/BraTS2021_Training_Data_Split_True_proportion_0.8_channels_t2_resized_FLIRT_binarised/imagesTs/BraTS2021_00266.nii.gz", 
+        "gt_path": "/home/parhomesmaeili/IS-Validation-Framework/IS_Validate/datasets/BraTS2021_Training_Data_Split_True_proportion_0.8_channels_t2_resized_FLIRT_binarised/imagesTs/labels/original/BraTS2021_00266.nii.gz" 
     }
 }

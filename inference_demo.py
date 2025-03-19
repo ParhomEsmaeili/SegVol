@@ -14,13 +14,13 @@ def set_parse():
     # %% set up parser
     parser = argparse.ArgumentParser()
     parser.add_argument("--test_mode", default=True, type=bool)
-    parser.add_argument("--resume", type = str, default = '')
+    parser.add_argument("--resume", type = str, default = './ckpt/SegVol_v1.pth')
     parser.add_argument("-infer_overlap", default=0.5, type=float, help="sliding window inference overlap")
     parser.add_argument("-spatial_size", default=(32, 256, 256), type=tuple)
     parser.add_argument("-patch_size", default=(4, 16, 16), type=tuple)
     parser.add_argument('-work_dir', type=str, default='./work_dir')
     ### demo
-    parser.add_argument('--demo_config', type=str, required=True)
+    parser.add_argument('--demo_config', type=str, default='./config/config_demo.json')
     parser.add_argument("--clip_ckpt", type = str, default = './config/clip')
     args = parser.parse_args()
     return args
@@ -206,9 +206,9 @@ def main(args):
 
     # seg config for prompt & zoom-in-zoom-out
     args.use_zoom_in = True
-    args.use_text_prompt = True
+    args.use_text_prompt = False #True
     args.use_box_prompt = True
-    args.use_point_prompt = False
+    args.use_point_prompt = False #True #False
     args.visualize = True
 
     inference_single_ct(args, segvol_model, data_item, categories)

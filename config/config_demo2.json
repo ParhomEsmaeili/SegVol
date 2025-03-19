@@ -1,0 +1,8 @@
+{
+    "dataset_name": "BraTS2021",
+    "categories": ["tumor"], 
+    "demo_case": {
+        "ct_path": "/home/parhomesmaeili/Radiology_Datasets/MSD/Task09_Spleen/imagesTr/spleen_2.nii.gz", 
+        "gt_path": "/home/parhomesmaeili/Radiology_Datasets/MSD/Task09_Spleen/labelsTr/spleen_2.nii.gz" 
+    }
+}

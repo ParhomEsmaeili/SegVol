@@ -160,6 +160,7 @@ class InferApp: #(Inferer):
         self.end_coord = None
 
         self.spatial_size = (32, 256, 256)
+        self.redo_map_zoomout_to_fg = True 
 
         #This is a set of transforms which takes an image and encoded prompt (analogous to the manner in which SegVol implements their mappings for zoom-in using 
         # image array representations) and extracts the region of interest according to the image. 
@@ -215,7 +216,8 @@ class InferApp: #(Inferer):
         clip_ckpt_path = os.path.join(base_dir, self.app_params['clip_checkpoint_path'])
 
         infer_device = self.infer_device 
-        return load_segvol(sv_model_type=sv_model_type, sv_ckpt_path=sv_ckpt_path, clip_ckpt_path=clip_ckpt_path, infer_device=infer_device)
+        
+        self.model = load_segvol(sv_model_type=sv_model_type, sv_ckpt_path=sv_ckpt_path, clip_ckpt_path=clip_ckpt_path, infer_device=infer_device)
 
     def build_inference_apps(self):
         #Building the inference app, needs to have an end to end system in place for each "model" type which can be passed by the request: 
@@ -264,19 +266,23 @@ class InferApp: #(Inferer):
                 coords = torch.cat(p_dict[0]['bboxes'], dim=0)
                 labels = torch.stack(p_dict[1]['bboxes'])
 
-                #Extracting the set of coordinate info by picking only the foreground bbox. 
+                #Extracting the set of coordinate info by picking only the foreground bbox as segvol does.
                 idxs = torch.argwhere(labels == 1)[:,0].tolist()
                 input_bbox = coords[idxs, :]
                 if input_bbox.shape[0] > 1:
-                    raise Exception('Cannot have more than one foreground bounding box')
-                #Creating the image array representation
-                input_p_mask = build_binary_cube(input_bbox, input_dom_shape[1:]).unsqueeze(0)
+                    raise Exception('Cannot handle more than one foreground bounding box at a given time.')
+                elif input_bbox.shape[0] == 0:
+                    warnings.warn('There was no foreground bounding box provided for this given class (class=foreground if binary segmentation task.)')
+                    input_p_mask = torch.zeros_like(input_dom_img)
+                else:
+                    #Creating the image array representation if we have one bbox!
+                    input_p_mask = build_binary_cube(input_bbox, input_dom_shape[1:]).unsqueeze(0)
         
             else:
                 raise Exception('No other prompting types are supported in SegVol.')
 
             if input_p_mask is None:
-                raise Exception('Prompt mask was not generated') 
+                raise Exception('BUG: Prompt mask was not generated despite the fact that there was a valid input prompt, even if it was empty due to handling of binary classes..') 
 
         else:
             #Handling empty prompt dict and/or Autosegmentation.
@@ -323,62 +329,8 @@ class InferApp: #(Inferer):
                   
         return (image_fg_dom, image_zoomout_dom), (prompt_fg_dom, prompt_zoomout_dom), (torch.from_numpy(start_coord), torch.from_numpy(end_coord))
 
-    def binary_map_zoomin_prompts(self, prompt, prompt_type, text_prompt=None):
-        """
-        Preprocessing steps:
-            - Modify in line with the volume cropping
-            - Modify in line with the interpolation
-            - Collect into a dictionary of slice:slice prompt
-        """
-
-        # Clean up
-        box_single = points_single = binary_cube = binary_points = None
-
-        if prompt_type == "point":
-            coords, labels = prompt.coords, prompt.labels
-            # # coords = coords[:,::-1]
-            # # Transform in line with cropping # These transforms were moved to transform_to_model_coordinates_sparse
-            # coords = coords - self.start_coord
-            # coords = np.maximum(coords, 0)
-            # coords = np.minimum(coords, self.end_coord)
-            # coords = np.round(
-            #     coords * np.array(self.spatial_size) / np.array(self.cropped_shape)
-            # )  # Transform in line with resizing
-
-            coords, labels = torch.from_numpy(coords).float(), torch.from_numpy(labels).float()
-            points_single = (coords.unsqueeze(0).cuda(), labels.unsqueeze(0).cuda())
-            binary_points_resize = build_binary_points(coords, labels, self.spatial_size)
-            binary_points = F.interpolate(
-                binary_points_resize.unsqueeze(0).unsqueeze(0).float(), size=self.cropped_shape, mode="nearest"
-            )[0][0]
-        if prompt_type == "box":
-            # # Transform box in line with image transformations # These transforms were moved to transform_to_model_coordinates_sparse
-            # box_single = np.array(prompt.bbox)  # Change from pair of points to 2x3 array
-            # box_single = box_single - self.start_coord  # transform in line with cropping
-            # box_single[0] = np.maximum(box_single[0], 0)
-            # box_single[1] = np.minimum(box_single[1], self.end_coord)
-            # box_single = np.round(
-            #     box_single * np.array(self.spatial_size) / np.array(self.cropped_shape)
-            # )  # Transform in line with resizing
-
-            box_single = np.array(prompt.bbox)  # Change from pair of points to 2x3 array
-            box_single = box_single.flatten()
-            box_single = torch.from_numpy(box_single).unsqueeze(0).float().cuda()
-
-            # Obtain binary cube
-            binary_cube_resize = build_binary_cube(box_single, self.spatial_size)
-            binary_cube = F.interpolate(
-                binary_cube_resize.unsqueeze(0).unsqueeze(0).float(), size=self.cropped_shape, mode="nearest"
-            )[0][0]
-
-        text_single = text_prompt
-        prompt = text_single, box_single, binary_cube, points_single, binary_points
-        return prompt
-
-
-
     def map_to_sparse_prompt(self, mapped_inputs:dict):
-        #Function which maps the prompts from the zoom-out domain's image-scale representation, to a sparse representation for performing inference.
+        #Function which maps the prompts from a (here zoom-out domain's) image-scale representation, to a sparse representation for performing inference.
 
         #Checking if there are any actual input prompts to begin with?:
         if mapped_inputs['prompt_type'] is None:
@@ -393,78 +345,32 @@ class InferApp: #(Inferer):
             nonzero_indices = torch.nonzero(mapped_inputs['prompt_zoom_dom'][0,0])
             if nonzero_indices.shape[0] == 0:
                 point_prompt = None 
+                warnings.warn('The mapping to model-domain has left no remaining input points despite there initially being some in the request!!')
             else:
-                point_prompt = nonzero_indices.unsqueeze(0)
-                raise NotImplementedError 
-            
+                point_prompt_coords = nonzero_indices.unsqueeze(0)
+                point_prompt_lbs = torch.ones(point_prompt_coords.shape[:-1])
+                point_prompt = (point_prompt_coords, point_prompt_lbs)
+
         elif mapped_inputs['prompt_type'] == 'bboxes':
             point_prompt = None 
             nonzero_indices = torch.nonzero(mapped_inputs['prompt_zoom_dom'][0,0])
             if nonzero_indices.shape[0] == 0:
                 box_prompt = None 
             else:
-                box_prompt = []
-                raise NotImplementedError 
-
+                min_d, max_d = nonzero_indices[:, 0].min(), nonzero_indices[:, 0].max()
+                min_h, max_h = nonzero_indices[:, 1].min(), nonzero_indices[:, 1].max()
+                min_w, max_w = nonzero_indices[:, 2].min(), nonzero_indices[:, 2].max()
+                
+                box_prompt = torch.tensor([min_d, min_h, min_w, max_d, max_h, max_w]).unsqueeze(0)
         else:
-            raise Exception('There was an unsupported prompt type inputted by the user!')
+            raise Exception('There was an unsupported prompt type inputted by the request!')
         
+        assert text_prompt is None
+        assert point_prompt is None or point_prompt.numel()
+        assert box_prompt is None or box_prompt.numel() 
+
         return text_prompt, point_prompt, box_prompt 
     
-    @torch.no_grad()
-    def predict(self):
-
-        
-
-        # zoom-in inference:
-        min_d, min_h, min_w, max_d, max_h, max_w = logits2roi_coor(self.spatial_size, logits_global_zoom_out)
-        if min_d is None:
-            res = (None, None, None, None, logits_global_zoom_out)
-            return res
-            # raise RuntimeError("Fail to detect foreground!")
-
-        # Crop roi
-        image_single_cropped = (
-            image_single[min_d : max_d + 1, min_h : max_h + 1, min_w : max_w + 1].unsqueeze(0).unsqueeze(0)
-        )
-        global_preds = (
-            torch.sigmoid(logits_global_zoom_out[min_d : max_d + 1, min_h : max_h + 1, min_w : max_w + 1]) > 0.5
-        ).long()
-
-        prompt_reflection = None
-        if prompt_type == "box":
-            binary_cube_cropped = binary_cube[min_d : max_d + 1, min_h : max_h + 1, min_w : max_w + 1]
-            prompt_reflection = (
-                binary_cube_cropped.unsqueeze(0).unsqueeze(0),
-                global_preds.unsqueeze(0).unsqueeze(0),
-            )
-        if prompt_type == "point":
-            binary_points_cropped = binary_points[min_d : max_d + 1, min_h : max_h + 1, min_w : max_w + 1]
-            prompt_reflection = (
-                binary_points_cropped.unsqueeze(0).unsqueeze(0),
-                global_preds.unsqueeze(0).unsqueeze(0),
-            )
-
-        ## inference
-        logits_single_cropped = sliding_window_inference(
-            image_single_cropped.cuda(),
-            prompt_reflection,
-            self.spatial_size,
-            1,
-            self.model,
-            self.infer_overlap,
-            text=text_single,
-            use_box=(prompt_type == "box"),
-            use_point=(prompt_type == "point"),
-        )
-        logits_single_cropped = logits_single_cropped.cpu().squeeze()
-        logits_global_zoom_in = logits_global_zoom_out.clone()
-        logits_global_zoom_in[min_d : max_d + 1, min_h : max_h + 1, min_w : max_w + 1] = logits_single_cropped
-
-        res = (image_single, points_single, box_single, logits_global_zoom_out, logits_global_zoom_in)
-
-        return res
-
     def postprocess_mask(self, mask, return_logits):
         """
         Postprocessing steps:
@@ -507,24 +413,27 @@ class InferApp: #(Inferer):
         return segmentation
 
 
-
-    def binary_zoom_out_predict(self, mapped_input:dict):
-        # Performing zoom-out inference:
+    @torch.no_grad()
+    def binary_zoom_out_predict(self, mapped_inputs:dict):
+        # Performing zoom-out inference and mapping back to fg.
 
         #Mapping the image-scale representation of the prompts into the sparse format for inputting.
 
 
-        text_input, box_input, points_input = self.map_to_sparse_prompt(mapped_input)
+        text_zoomout_input, points_zoomout_input, box_zoomout_input = self.map_to_sparse_prompt(mapped_inputs)
         
         logits_global_zoom_out = self.model(
-            image_single_resize.cuda(), text=text_input, boxes=box_input, points=points_input
+            mapped_inputs['img_zoomout_dom'], text=text_zoomout_input, boxes=box_zoomout_input, points=points_zoomout_input
         )
 
-        # resize back global logits
-        logits_global_zoom_out = F.interpolate(logits_global_zoom_out.cpu(), size=self.cropped_shape, mode="nearest")[
+        # resize back global logits to the fg domain.
+        logits_fg = F.interpolate(logits_global_zoom_out.cpu(), size=mapped_inputs['fg_dom_shape'], mode="nearest")[
             0
         ][0]
 
+        return logits_fg #text_zoomout_input, points_zoomout_input, box_zoomout_input, logits_global_zoom_out
+
+    @torch.no_grad()
     def binary_predict(self, request):
         
         #Callbacks which will be what is used to process the input requests for zoomout inference (and to store the original image domain relevant info for pasting back
@@ -532,10 +441,62 @@ class InferApp: #(Inferer):
 
         mapped_inputs = self.binary_subject_prep(request=request)
 
-        #Performing inference on the zoom-out image.
+        #Performing inference on the zoom-out image and mapping back to fg.
 
-        self.binary_zoom_out_predict(mapped_inputs)
-        #Mapping image, prompts, pred to the zoom-in.
+        logits_fg = self.binary_zoom_out_predict(mapped_inputs)
+
+
+        #Extracting the region of interest for zoom-in, also checks if there was any foreground estimated....:
+        min_d, min_h, min_w, max_d, max_h, max_w = logits2roi_coor(spatial_size=mapped_inputs['fg_dom_shape'], logits_global_single=logits_fg)
+
+        if min_d is None:
+            warnings.warn('Warning, for one reason or another, no foreground was detected and skipping zoom-in. Results may be very poor if the target actually exists....')
+        else:
+            #Otherwise, there is not much wrong here, just continue as segvol does.. mapping image, prompts, pred to the zoom-in.
+        
+            # Crop roi for zoom-in from the foreground region cropped roi.
+            img_zoomin_dom = mapped_inputs['img_fg_dom'][min_d:max_d+1, min_h:max_h+1, min_w:max_w+1].unsqueeze(0).unsqueeze(0)
+            coarse_pred_zoomin_dom = (torch.sigmoid(logits_fg[min_d:max_d+1, min_h:max_h+1, min_w:max_w+1])>0.5).long()
+
+            if self.redo_map_zoomout_to_fg:
+            #Using image-representation mapping of prompts in same capacity as segvol from zoom-out domain to foreground domain (even though we already have this....).
+            # to be able to build prompt reflection for zoom-in
+                
+                #We have a generic mask representation in the format used by SegVol for their resizing already.
+                prompt_fg_dom = F.interpolate(
+                    mapped_inputs['prompt_zoom_dom'].float(),
+                    size=mapped_inputs['fg_dom_shape'], mode='nearest')[0][0]
+            else:
+                prompt_fg_dom = mapped_inputs['prompt_fg_dom']
+                #We already have the prompts in the foreground domain representation, removing additional lossy transforms probably will prevent loss of information.
+
+            prompt_reflection = None
+
+            prompt_zoomin_dom = prompt_fg_dom[min_d:max_d+1, min_h:max_h+1, min_w:max_w+1]
+            prompt_reflection = (
+                prompt_zoomin_dom.unsqueeze(0).unsqueeze(0),
+                coarse_pred_zoomin_dom.unsqueeze(0).unsqueeze(0),
+            )
+
+            assert img_zoomin_dom.shape[2:] == coarse_pred_zoomin_dom.shape == prompt_zoomin_dom.shape 
+            ## inference
+            logits_zoomin_dom = sliding_window_inference(
+                img_zoomin_dom,
+                prompt_reflection,
+                self.spatial_size,
+                1,
+                self.model,
+                self.infer_overlap,
+                text=None,
+                use_box=(mapped_inputs['prompt_type'] == "bboxes"),
+                use_point=(mapped_inputs['prompt_type'] == "points"),
+            ).cpu().squeeze()
+
+            logits_fg[min_d:max_d + 1, min_h:max_h+1, min_w:max_w+1] = logits_zoomin_dom
+            
+        
+        #Here we will perform the re-insertion back into the original image size. Probably can convert to probabilistic map here because we can't pad with -inf to represent
+        #the background.
 
 
     # def predict(
@@ -693,24 +654,24 @@ if __name__ == '__main__':
         {'Interactive Init':{
             'interaction_torch_format': {
                 'interactions': {
-                    'points': None, #[torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], 
+                    'points': None, #[torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], #None, #[torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], 
                     'scribbles': None, 
-                    'bboxes': [torch.Tensor([[1,2,3,118,118,75]]).to(dtype=torch.int64)] #None 
+                    'bboxes': [torch.Tensor([[56,30,17, 92, 76, 51]]).to(dtype=torch.int64)] #None 
                     },
                 'interactions_labels': {
-                    'points': None, #[torch.tensor([0]), torch.tensor([1])], 
+                    'points': None, #[torch.tensor([0]), torch.tensor([1])], #None,#[torch.tensor([0]), torch.tensor([1])], 
                     'scribbles': None, 
                     'bboxes': [torch.Tensor([1]).to(dtype=torch.int64)] #None
                     }
                     },
           
             'interaction_dict_format': {
-            # 'points': {'background': [[40, 103, 43]],
-            # 'tumor': [[62, 62, 39]]
-            # },
+            'points': {'background': [[40, 103, 43]],
+            'tumor': [[62, 62, 39]]
+            },
             # 'points': None,
             'scribbles': None,
-            'bboxes': {'background': [], 'tumor': [[1, 2, 3, 118, 118, 75]]} #None #{'background': [], 'tumor': [[1, 2, 3, 4, 5, 6]]}
+            'bboxes': None, #{'background': [], 'tumor': [[56,30,17, 92, 76, 51]]} #None
             },
             'prev_probs': {'metatensor': None, 'meta_dict': None}, 
             'prev_pred': {'metatensor': None, 'meta_dict': None}}

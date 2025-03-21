@@ -234,7 +234,7 @@ class InferApp: #(Inferer):
         
         input_dom_img = im_dict['metatensor']
         input_dom_affine = im_dict['meta_dict']['affine']
-        input_dom_shape = input_dom_img.shape
+        input_dom_shape = input_dom_img.shape[1:] #Assuming a channel-first image is being provided.
 
         if bool(is_state):
             #Placing the prompts into a tensor, we will be doing this in the same capacity as the demo implementation of SegVol which will inevitably lead to 
@@ -246,7 +246,7 @@ class InferApp: #(Inferer):
             #Determine the prompt type from the input prompt dictionaries: Not sure if intersection is optimal for catching exceptions here.
             provided_ptypes = list(set([k for k,v in p_dict[0].items() if v is not None]) & set([k for k,v in p_dict[1].items() if v is not None]))
             if not len(provided_ptypes) == 1:
-                raise Exception('Only one valid prompt is permitted for SegVol otherwise the zoom-in mechanism is non-functional.')
+                raise Exception(f'Only one prompt is permitted for SegVol when using zoom-in activated, we received {len(provided_ptypes)}')
             
             if provided_ptypes[0] == "points":
                 
@@ -255,7 +255,7 @@ class InferApp: #(Inferer):
                 coords = torch.cat(p_dict[0]['points'], dim=0)
                 labels = torch.cat(p_dict[1]['points'], dim=0)
                 # points_input = (coords.unsqueeze(0).to(device=self.infer_device), labels.unsqueeze(0).to(device=self.infer_device))
-                input_p_mask = build_binary_points(coords, labels, input_dom_shape[1:]).unsqueeze(0)
+                input_p_mask = build_binary_points(coords, labels, input_dom_shape).unsqueeze(0)
                 input_p_mask = input_p_mask
 
             elif provided_ptypes[0] == "bboxes":
@@ -276,7 +276,7 @@ class InferApp: #(Inferer):
                     input_p_mask = torch.zeros_like(input_dom_img)
                 else:
                     #Creating the image array representation if we have one bbox!
-                    input_p_mask = build_binary_cube(input_bbox, input_dom_shape[1:]).unsqueeze(0)
+                    input_p_mask = build_binary_cube(input_bbox, input_dom_shape).unsqueeze(0)
         
             else:
                 raise Exception('No other prompting types are supported in SegVol.')
@@ -371,48 +371,6 @@ class InferApp: #(Inferer):
 
         return text_prompt, point_prompt, box_prompt 
     
-    def postprocess_mask(self, mask, return_logits):
-        """
-        Postprocessing steps:
-            - TODO
-        """
-        if not return_logits:
-            mask = (mask > 0).cpu().numpy().astype(np.uint8)
-
-        return mask
-
-    def inv_trans_dense(self, mask: np.ndarray) -> nib.Nifti1Image:
-        # Invert transform
-        shape_after_dimtranspose = self.orig_shape[::-1]
-        # undo crop foreground
-        padded_segmenation_shape = np.maximum(self.spatial_size, shape_after_dimtranspose)
-        padded_segmentation = np.zeros(
-            padded_segmenation_shape, dtype=np.uint8
-        )  # Should be created in 32,256,256 shape
-        padded_segmentation[
-            self.start_coord[0] : self.end_coord[0],
-            self.start_coord[1] : self.end_coord[1],
-            self.start_coord[2] : self.end_coord[2],
-        ] = mask  #  stick into 32,256,256 shape then undo pad # ToDo needs fixing, try MS instances:
-
-        # undo spatial pad
-        total_pads = np.maximum(np.array(self.spatial_size) - np.array(shape_after_dimtranspose), 0)
-        pad_starts = total_pads // 2
-
-        transposed_segmentation = padded_segmentation[
-            pad_starts[0] : shape_after_dimtranspose[0] + pad_starts[0],
-            pad_starts[1] : shape_after_dimtranspose[1] + pad_starts[1],
-            pad_starts[2] : shape_after_dimtranspose[2] + pad_starts[2],
-        ]
-
-        # undo dim_transpose
-        segmentation = np.transpose(transposed_segmentation, (2, 1, 0))
-
-        segmentation = nib.Nifti1Image(segmentation, self.orig_affine)
-
-        return segmentation
-
-
     @torch.no_grad()
     def binary_zoom_out_predict(self, mapped_inputs:dict):
         # Performing zoom-out inference and mapping back to fg.
@@ -494,54 +452,70 @@ class InferApp: #(Inferer):
 
             logits_fg[min_d:max_d + 1, min_h:max_h+1, min_w:max_w+1] = logits_zoomin_dom
             
+        assert logits_fg.shape == mapped_inputs['img_fg_dom'].shape
+
+        #Here we will perform the re-insertion back into the original image input domain.
+        return self.binary_process_output(mapped_inputs, logits_fg)
+
         
-        #Here we will perform the re-insertion back into the original image size. Probably can convert to probabilistic map here because we can't pad with -inf to represent
-        #the background.
 
+    def binary_process_output(self, mapped_inputs:dict, logits_fg: torch.Tensor):
+        
+        #This func will be reversing the order of operations in the input processing, in order to convert our foreground logits to the outputs desired:
+        #probabilistic map & a discretised segmentation, both channel first in the input image domain!
 
-    # def predict(
-    #     self,
-    #     prompt: PromptStep | Boxes3D,
-    #     text_prompt=None,
-    #     return_logits=False,
-    #     prev_seg=None,
-    #     promptstep_in_model_coord_system=False,
-    #     seed=1,
-    # ):
-    #     if self.loaded_image is None:
-    #         raise RuntimeError("Must first set image!")
+        #Convert to probabilistic map here because we can't pad with -inf to represent the background probability.
 
-    #     if not isinstance(prompt, (Boxes3D, PromptStep)):
-    #         raise TypeError(
-    #             "Prompts must be 3d bounding boxes or points, and must be supplied as an instance of Boxes3D or PromptStep"
-    #         )
+        prob_fg = torch.sigmoid(logits_fg)
 
-    #     prompt_type = "box" if isinstance(prompt, Boxes3D) else "point"
+        #Now map to the input image domain.
 
-    #     if prompt_type == "point":
-    #         torch.manual_seed(
-    #             seed
-    #         )  # New points are sampled in the zoom-in section of zoom-out zoom-in inference leaving some randomness even after a point prompt is fixed.
+        #Process entails the creation of a zeros array which will undergo morphological operations in the same process as image, which we will then use to store info for
+        # undoing the return of outputs. We borrow the approach from the authors of Radioactive to simplify our work and ensure we do not error here.
 
-    #     image_single, image_single_resize = self.img, self.img_zoom_out
+        # Dimension transposition was first.
+        transpose_dom_shape = mapped_inputs['input_dom_shape'][::-1]
+        # Then it was padding. 
+        padded_dom_shape = torch.maximum(torch.tensor(self.spatial_size), torch.tensor(transpose_dom_shape))
+        #Create an empty array to insert the foreground probability map.
+        prob_padded_dom = torch.zeros(
+            *padded_dom_shape, dtype=torch.float64
+        ) 
+        prob_padded_dom[
+            mapped_inputs['start_coord'][0] : mapped_inputs['end_coord'][0],
+            mapped_inputs['start_coord'][1] : mapped_inputs['end_coord'][1],
+            mapped_inputs['start_coord'][2] : mapped_inputs['end_coord'][2],
+        ] = prob_fg 
 
-    #     prompt = deepcopy(prompt)
-    #     if not promptstep_in_model_coord_system:
-    #         prompt = self.transform_promptstep_to_model_coords(prompt)
-    #     prompt = self.preprocess_prompt(prompt, prompt_type, text_prompt)
+        #Now we undo: 
 
-    #     res = self.segment(image_single, image_single_resize, prompt, prompt_type)
+        # Undo pad, we extract the padding quantity. The defn of the function in MONAI implements the following logic: 
+        # padding_i = { 
+        #               if dim_i > input_dim_i -> dim_i - input_dim_i 
+        #               else -> 0
+        # }
+        dimension_padding = torch.maximum(torch.tensor(self.spatial_size) - torch.tensor(transpose_dom_shape), torch.zeros(len(self.spatial_size)))
+        pad = (dimension_padding // 2).int()
 
-    #     segmentation = self.postprocess_mask(res[-1], return_logits)
+        prob_transpose_dom = prob_padded_dom[
+            pad[0] : transpose_dom_shape[0] + pad[0],
+            pad[1] : transpose_dom_shape[1] + pad[1],
+            pad[2] : transpose_dom_shape[2] + pad[2],
+        ]
 
-    #     segmentation_model_arr = segmentation
+        # Undo the dim_transpose
+        prob_input_dom = torch.permute(prob_transpose_dom, (2, 1, 0))
 
-    #     # Turn into Nifti object in original space
-    #     segmentation_orig_nib = self.inv_trans_dense(segmentation)
+        assert prob_input_dom.shape == mapped_inputs['input_dom_shape']
+        
+        #Now we must convert this into the format expected by the validation framework. CHWD for the prob and 1HWD for the discrete pred.
 
-    #     low_res_logits = None  # low_res_logits aren't easily accessed nor used since segvol isn't interactive
+        #The config labels are always corresponding to 0,1 with 0 background and 1 fg. Hence we stack these correspondingly.
 
-    #     return segmentation_orig_nib, low_res_logits, segmentation_model_arr
+        output_prob_map = torch.stack([1 - prob_input_dom, prob_input_dom])
+        output_pred_map = (prob_input_dom > 0.5).long().unsqueeze(0)
+
+        return (output_prob_map, output_pred_map, mapped_inputs['input_dom_affine'])
 
     def binary_subject_prep(self, request:dict):
         
@@ -560,9 +534,9 @@ class InferApp: #(Inferer):
         im_order.extend(edit_names_list) 
         #Loading the image and prompts in the input-im domain & the zoom-out domain.
         
+
         if request['model'] == 'IS_interactive_edit':
             #In this case we are working with an interactive edit
-            # assert self.image_embeddings, 'Image embeddings must exist and be stored for editing'
             raise Exception('SegVol, by default, is not configured to be used with iterative refinement approaches.')
         
 
@@ -570,10 +544,7 @@ class InferApp: #(Inferer):
             key = 'Interactive Init' 
             is_state = request['im'][key]
 
-            # self.image_info = None 
-            #Mapping the image and prompts into the model coordinate domain (foreground crop region) 
-            
-            # NOTE: In order to disentangle the validation framework from inference apps 
+            #Extracting the image in the model's coordinate space.  # NOTE: In order to disentangle the validation framework from inference apps 
             # this is always assumed to be handled within the inference app.
             
             mapped_input = self.binary_prop_to_model(request['image'], is_state)  
@@ -583,9 +554,10 @@ class InferApp: #(Inferer):
             is_state = request['im'][key]
             if is_state is not None:
                 raise Exception('Autoseg should not have any interaction info.')
-            # self.image_info = None 
+            
             #Extracting the image in the model's coordinate space. NOTE: In order to disentangle the validation framework from inference apps 
             # this is always assumed to be handled within the inference app.
+
             mapped_input = self.binary_prop_to_model(request['image'], is_state)        
 
         return mapped_input 
@@ -600,19 +572,26 @@ class InferApp: #(Inferer):
         else:
             raise Exception('Should not have received less than two class labels at minimum')
         
-        request = copy.deepcopy(request) 
+        #We create a duplicate so we can transform the data from metatensor format to the torch tensor format compatible with the inference script.
+        modif_request = copy.deepcopy(request) 
 
-        app = self.infer_apps[request['model']][f'{class_type}_predict']
+        app = self.infer_apps[modif_request['model']][f'{class_type}_predict']
 
-        self.return_logits=True #False, we change this from the implementation by RadioActive, since we would like to generate a probabilistic map from the api call.
+        #Setting the configs label dictionary for this inference request.
+        self.configs_labels_dict = modif_request['config_labels_dict']
 
-        probs_tensor, pred, affine = app(request=request)
+
+        probs_tensor, pred, affine = app(request=modif_request)
+
+
+
 
         assert probs_tensor.shape[1:] == request['image']['metatensor'].shape[1:]
         assert pred.shape[1:] == request['image']['metatensor'].shape[1:] 
         assert torch.all(affine == request['image']['metatensor'].meta['affine'])
         assert isinstance(probs_tensor, torch.Tensor) 
-        assert isinstance(pred, torch.Tensor) 
+        assert isinstance(pred, torch.Tensor)
+        assert isinstance(affine, torch.Tensor)
 
         output = {
             'probs':{
@@ -634,16 +613,19 @@ if __name__ == '__main__':
 
     infer_app.app_configs()
 
-    from monai.transforms import LoadImaged, Orientationd, EnsureChannelFirstd, Compose  
+    from monai.transforms import LoadImaged, Orientationd, EnsureChannelFirstd, Compose 
+    import nibabel as nib 
 
     input_dict = {'image':'/home/parhomesmaeili/IS-Validation-Framework/IS_Validate/datasets/BraTS2021_Training_Data_Split_True_proportion_0.8_channels_t2_resized_FLIRT_binarised/imagesTs/BraTS2021_00266.nii.gz'}
     load_and_transf = Compose([LoadImaged(keys=['image']), EnsureChannelFirstd(keys=['image']), Orientationd(keys=['image'], axcodes='RAS')])
 
     final_loaded_im = load_and_transf(input_dict)
+    input_metatensor = MetaTensor(x=torch.from_numpy(final_loaded_im['image']).to(dtype=torch.float64), meta=final_loaded_im['image_meta_dict'],affine=torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64))
+    # MetaTensor(x=torch.from_numpy(final_loaded_im['image']).to(dtype=torch.float64), meta=final_loaded_im['image_meta_dict'], affine=torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64))
     request = {
         'image':{
-            'metatensor': torch.from_numpy(final_loaded_im['image']),
-            'meta_dict':{'affine':torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64)}
+            'metatensor': input_metatensor,
+            'meta_dict':{'affine':input_metatensor.affine}
         },
         # 'model':'IS_interactive_edit',
         'model': 'IS_interactive_init',
@@ -654,14 +636,14 @@ if __name__ == '__main__':
         {'Interactive Init':{
             'interaction_torch_format': {
                 'interactions': {
-                    'points': None, #[torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], #None, #[torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], 
+                    'points': [torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], #None
                     'scribbles': None, 
-                    'bboxes': [torch.Tensor([[56,30,17, 92, 76, 51]]).to(dtype=torch.int64)] #None 
+                    'bboxes': None, #[torch.Tensor([[56,30,17, 92, 76, 51]]).to(dtype=torch.int64)] #None 
                     },
                 'interactions_labels': {
-                    'points': None, #[torch.tensor([0]), torch.tensor([1])], #None,#[torch.tensor([0]), torch.tensor([1])], 
+                    'points': [torch.tensor([0]), torch.tensor([1])], #None,#[torch.tensor([0]), torch.tensor([1])], 
                     'scribbles': None, 
-                    'bboxes': [torch.Tensor([1]).to(dtype=torch.int64)] #None
+                    'bboxes': None, #[torch.Tensor([1]).to(dtype=torch.int64)] #None
                     }
                     },
           
@@ -677,5 +659,5 @@ if __name__ == '__main__':
             'prev_pred': {'metatensor': None, 'meta_dict': None}}
         },
     }
-    infer_app(request)
+    output = infer_app(request)
     print('halt')

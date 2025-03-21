@@ -244,7 +244,7 @@ class InferApp: #(Inferer):
             coords = labels = input_p_mask = None
             
             #Determine the prompt type from the input prompt dictionaries: Not sure if intersection is optimal for catching exceptions here.
-            provided_ptypes = list(set([k for k,v in p_dict[0].items() if v is not None]) & set([k for k,v in p_dict[1].items() if v is not None]))
+            provided_ptypes = list(set([k for k,v in p_dict[0].items() if v is not None]) & set([k[:-7] for k,v in p_dict[1].items() if v is not None]))
             if not len(provided_ptypes) == 1:
                 raise Exception(f'Only one prompt is permitted for SegVol when using zoom-in activated, we received {len(provided_ptypes)}')
             
@@ -253,7 +253,7 @@ class InferApp: #(Inferer):
                 #NOTE: The strategy employed by SegVol when working with image representations of prompt inputs will inevitably lead to the deletion of background prompts 
                 # as they only retain the 1s. (Whatever that is depends on the definition here, but typically it will be some arbitary foreground.)
                 coords = torch.cat(p_dict[0]['points'], dim=0)
-                labels = torch.cat(p_dict[1]['points'], dim=0)
+                labels = torch.cat(p_dict[1]['points_labels'], dim=0)
                 # points_input = (coords.unsqueeze(0).to(device=self.infer_device), labels.unsqueeze(0).to(device=self.infer_device))
                 input_p_mask = build_binary_points(coords, labels, input_dom_shape).unsqueeze(0)
                 input_p_mask = input_p_mask
@@ -264,7 +264,7 @@ class InferApp: #(Inferer):
                 #NOTE: We can typically assume that the background probably won't have a bbox because that doesn't really have an inherent meaning.... 
 
                 coords = torch.cat(p_dict[0]['bboxes'], dim=0)
-                labels = torch.stack(p_dict[1]['bboxes'])
+                labels = torch.stack(p_dict[1]['bboxes_labels'])
 
                 #Extracting the set of coordinate info by picking only the foreground bbox as segvol does.
                 idxs = torch.argwhere(labels == 1)[:,0].tolist()
@@ -620,7 +620,8 @@ if __name__ == '__main__':
     load_and_transf = Compose([LoadImaged(keys=['image']), EnsureChannelFirstd(keys=['image']), Orientationd(keys=['image'], axcodes='RAS')])
 
     final_loaded_im = load_and_transf(input_dict)
-    input_metatensor = MetaTensor(x=torch.from_numpy(final_loaded_im['image']).to(dtype=torch.float64), meta=final_loaded_im['image_meta_dict'],affine=torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64))
+    meta = {'original_affine': torch.from_numpy(final_loaded_im['image_meta_dict']['original_affine']).to(dtype=torch.float64), 'affine': torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64)}
+    input_metatensor = MetaTensor(x=torch.from_numpy(final_loaded_im['image']).to(dtype=torch.float64), meta=meta) #affine=torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64))
     # MetaTensor(x=torch.from_numpy(final_loaded_im['image']).to(dtype=torch.float64), meta=final_loaded_im['image_meta_dict'], affine=torch.from_numpy(final_loaded_im['image_meta_dict']['affine']).to(dtype=torch.float64))
     request = {
         'image':{
@@ -636,14 +637,14 @@ if __name__ == '__main__':
         {'Interactive Init':{
             'interaction_torch_format': {
                 'interactions': {
-                    'points': [torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], #None
+                    'points': None, #[torch.tensor([[40, 103, 43]]), torch.tensor([[62, 62, 39]])], #None
                     'scribbles': None, 
-                    'bboxes': None, #[torch.Tensor([[56,30,17, 92, 76, 51]]).to(dtype=torch.int64)] #None 
+                    'bboxes': [torch.Tensor([[56,30,17, 92, 76, 51]]).to(dtype=torch.int64)] #None 
                     },
                 'interactions_labels': {
-                    'points': [torch.tensor([0]), torch.tensor([1])], #None,#[torch.tensor([0]), torch.tensor([1])], 
-                    'scribbles': None, 
-                    'bboxes': None, #[torch.Tensor([1]).to(dtype=torch.int64)] #None
+                    'points_labels': None,#[torch.tensor([0]), torch.tensor([1])], #None,#[torch.tensor([0]), torch.tensor([1])], 
+                    'scribbles_labels': None, 
+                    'bboxes_labels': [torch.Tensor([1]).to(dtype=torch.int64)] #None
                     }
                     },
           

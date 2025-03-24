@@ -326,7 +326,7 @@ class InferApp: #(Inferer):
         
         image_fg_dom = image_fg_dom[0, 0]
         prompt_fg_dom = prompt_fg_dom[0, 0]
-                  
+   
         return (image_fg_dom, image_zoomout_dom), (prompt_fg_dom, prompt_zoomout_dom), (torch.from_numpy(start_coord), torch.from_numpy(end_coord))
 
     def map_to_sparse_prompt(self, mapped_inputs:dict):
@@ -350,6 +350,10 @@ class InferApp: #(Inferer):
                 point_prompt_coords = nonzero_indices.unsqueeze(0)
                 point_prompt_lbs = torch.ones(point_prompt_coords.shape[:-1])
                 point_prompt = (point_prompt_coords, point_prompt_lbs)
+            print(f'\n pre_zoom shape: {mapped_inputs["img_fg_dom"].shape}')
+            print(f'pre_zoom point coord: {torch.argwhere(mapped_inputs["prompt_fg_dom"])}')
+            print(f'post_zoom shape: {mapped_inputs["img_zoomout_dom"].shape}')
+            print(f'post zoom-out point locations {nonzero_indices} \n')
 
         elif mapped_inputs['prompt_type'] == 'bboxes':
             point_prompt = None 
@@ -366,7 +370,7 @@ class InferApp: #(Inferer):
             raise Exception('There was an unsupported prompt type inputted by the request!')
         
         assert text_prompt is None
-        assert point_prompt is None or point_prompt.numel()
+        assert point_prompt is None or point_prompt[0].numel()
         assert box_prompt is None or box_prompt.numel() 
 
         return text_prompt, point_prompt, box_prompt 

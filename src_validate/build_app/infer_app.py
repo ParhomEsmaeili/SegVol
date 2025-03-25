@@ -160,7 +160,7 @@ class InferApp: #(Inferer):
         self.end_coord = None
 
         self.spatial_size = (32, 256, 256)
-        self.redo_map_zoomout_to_fg = True 
+        self.redo_map_zoomout_to_fg = False #True 
 
         #This is a set of transforms which takes an image and encoded prompt (analogous to the manner in which SegVol implements their mappings for zoom-in using 
         # image array representations) and extracts the region of interest according to the image. 
@@ -292,6 +292,14 @@ class InferApp: #(Inferer):
         (img_fg_dom, img_zoomout_dom), (prompt_fg_dom, prompt_zoomout_dom), (start_coord, end_coord) = self.input_forward_map(
             input_dom_img, input_p_mask
         )
+        
+        if provided_ptypes[0] == 'points':
+            point_idxs = torch.argwhere(prompt_zoomout_dom)
+            try:
+                delete_points = tuple(point_idxs[1:,:].T) 
+                prompt_zoomout_dom[delete_points] = 0
+            except:
+                pass 
         
         return {
             'img_fg_dom': img_fg_dom,

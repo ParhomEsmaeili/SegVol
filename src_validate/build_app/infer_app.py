@@ -225,9 +225,9 @@ class InferApp: #(Inferer):
         # IS_autoseg, IS_interactive_init, IS_interactive_edit. (all are intuitive wrt what they represent.) 
         
         self.infer_apps = {
-            'IS_autoseg':{'binary_predict':self.binary_predict},
-            'IS_interactive_init': {'binary_predict':self.binary_predict},
-            'IS_interactive_edit': {'binary_predict':self.binary_predict}
+            'IS_autoseg':{'binary_predict':self.binary_inference},
+            'IS_interactive_init': {'binary_predict':self.binary_inference},
+            'IS_interactive_edit': {'binary_predict':self.binary_inference}
             }
         
     def binary_prop_to_model(self, im_dict: dict, is_state: dict | None):
@@ -404,7 +404,7 @@ class InferApp: #(Inferer):
         return logits_fg #text_zoomout_input, points_zoomout_input, box_zoomout_input, logits_global_zoom_out
 
     @torch.no_grad()
-    def binary_predict(self, request):
+    def binary_inference(self, request):
         
         #Callbacks which will be what is used to process the input requests for zoomout inference (and to store the original image domain relevant info for pasting back
         # segmentation.

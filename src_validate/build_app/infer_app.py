@@ -261,7 +261,7 @@ class InferApp: #(Inferer):
             elif provided_ptypes[0] == "bboxes":
                 #NOTE: The strategy employed by SegVol when working with image representations of prompt inputs will inevitably lead to the deletion of background prompts 
                 # as they only retain the 1s. (Whatever that is depends on the definition here, but typically it will be some arbitary foreground.)
-                #NOTE: We can typically assume that the background probably won't have a bbox because that doesn't really have an inherent meaning.... 
+                #NOTE: We can typically assume that the background probably won't have a bbox because that doesn't really have an inherent meaning for segvol.. 
 
                 coords = torch.cat(p_dict[0]['bboxes'], dim=0)
                 labels = torch.stack(p_dict[1]['bboxes_labels'])
@@ -524,7 +524,14 @@ class InferApp: #(Inferer):
 
         #The config labels are always corresponding to 0,1 with 0 background and 1 fg. Hence we stack these correspondingly.
 
-        output_prob_map = torch.stack([1 - prob_input_dom, prob_input_dom])
+        output_prob_list = []
+        for label in self.configs_labels_dict.keys():
+            if label.title() == 'Background':
+                output_prob_list.append(1-prob_input_dom)
+            else:
+                output_prob_list.append(prob_input_dom)  
+        output_prob_map = torch.stack(output_prob_list)
+        
         output_pred_map = (prob_input_dom > 0.5).long().unsqueeze(0)
 
         return (output_prob_map, output_pred_map, mapped_inputs['input_dom_affine'])

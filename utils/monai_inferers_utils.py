@@ -32,9 +32,16 @@ tqdm, _ = optional_import("tqdm", name="tqdm")
 
 __all__ = ["sliding_window_inference"]
 
-def logits2roi_coor(spatial_size, logits_global_single):
+def logits2roi_coor(spatial_size, logits_global_single, prompt_map):
     # crop predict
     pred_global_single = torch.sigmoid(logits_global_single) > 0.5
+
+    #NOTE: Modification was made here in the SegFM implementation to also include the prompt array in the calculation of the ROI. This
+    #is presumably to ensure that it should do something if there was a foreground prompt available in the foreground domain. They implemented
+    #it for the bounding box, but more generally this should be done for all prompts.
+    assert pred_global_single.shape == prompt_map.shape, f"pred_global_single (fg pred) shape {pred_global_single.shape} does not match prompt_map shape {prompt_map.shape}"
+    pred_global_single = pred_global_single + prompt_map
+
     ## get all pos idx
     nonzero_indices = torch.nonzero(pred_global_single)
     if nonzero_indices.shape[0] == 0:
